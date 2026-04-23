@@ -3,7 +3,7 @@
 `photo-sorter` scans unsorted photo and video folders, groups media by capture date and place, and writes the result into a date-and-location hierarchy such as:
 
 ```text
-AI-sorted/2025/01_12_Bear_Valley
+AI-sorted/2025/01-12_Bear_Valley
 ```
 
 It uses local metadata first, then location lookup, then configurable aliases, and optionally OpenAI to produce short human-friendly place labels.
@@ -126,7 +126,7 @@ When both the destination-local alias file and the main config define the same a
 The sorter creates output like:
 
 ```text
-<DESTINATION>/2025/01_12_Bear_Valley/
+<DESTINATION>/2025/01-12_Bear_Valley/
 ```
 
 Each created folder also contains:

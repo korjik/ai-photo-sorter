@@ -776,7 +776,7 @@ function buildGroups(enriched: Array<{ record: MetadataRecord; context: PlaceCon
   for (const item of enriched) {
     const dateKey = localDateKey(item.record.capturedAt);
     const year = dateKey.slice(0, 4);
-    const monthDay = `${dateKey.slice(5, 7)}_${dateKey.slice(8, 10)}`;
+    const monthDay = `${dateKey.slice(5, 7)}-${dateKey.slice(8, 10)}`;
     const locationKey = buildLocationKey(item.context);
     const key = `${dateKey}__${locationKey}`;
     const existing = groups.get(key);
