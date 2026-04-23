@@ -5,6 +5,7 @@ import { z } from "zod";
 import { createReadStream, promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 type SortMode = "copy" | "hardlink" | "move";
 
@@ -26,6 +27,7 @@ type Config = {
   mode: SortMode;
   inferenceWindowMinutes: number;
   supportedExtensions: string[];
+  ignoreFolders?: string[];
   openai: {
     enabled: boolean;
     model: string;
@@ -114,6 +116,13 @@ type LabeledGroup = SortGroup & {
   decision: PlaceLabelDecision;
 };
 
+type CliArgs = {
+  execute: boolean;
+  dryRun: boolean;
+  configPath?: string;
+  limit?: number;
+};
+
 const placeLabelSchema = z.object({
   placeLabel: z
     .string()
@@ -122,30 +131,43 @@ const placeLabelSchema = z.object({
     .describe("Human-friendly place label like Bear Valley, Home, or Golden Gate Park."),
 });
 
-const DEFAULT_CONFIG_PATH = path.resolve(process.cwd(), "photo-sorter.config.json");
+const DEFAULT_CONFIG_PATH = path.resolve(process.cwd(), "ai-photo-sorter.config.json");
+const LEGACY_CONFIG_PATH = path.resolve(process.cwd(), "photo-sorter.config.json");
 const LEGACY_CACHE_PATH = path.resolve(process.cwd(), ".cache", "photo-sorter-cache.json");
 const DEFAULT_PHOTO_ROOT = "/photo";
-const LOCATION_CONFIG_FILE_NAME = "photo-sorter-location.config.json";
+const LOCATION_CONFIG_FILE_NAME = "ai-photo-sorter-location.config.json";
+const LEGACY_LOCATION_CONFIG_FILE_NAME = "photo-sorter-location.config.json";
 const FOLDER_METADATA_FILE_NAME = ".ai-sorted";
-const DESTINATION_CACHE_FILE_NAME = ".photo-sorter-cache.json";
+const DESTINATION_CACHE_FILE_NAME = ".ai-photo-sorter-cache.json";
+const LEGACY_DESTINATION_CACHE_FILE_NAME = ".photo-sorter-cache.json";
+const DEFAULT_IGNORE_FOLDERS = ["@eaDir"];
+const MISC_PLACE_LABEL = "Misc";
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const configPath = path.resolve(process.cwd(), args.configPath ?? DEFAULT_CONFIG_PATH);
+  const defaultConfigPath = await resolveDefaultConfigPath();
+  const configPath = path.resolve(process.cwd(), args.configPath ?? defaultConfigPath);
   const execute = args.execute;
   const config = await loadConfig(configPath, execute);
+  console.log(`Loaded config: ${configPath}`);
+  console.log(`Loaded aliases: ${formatAliasSummary(config.aliases)}`);
   const cachePath = getDestinationCachePath(config);
   const openaiClient = buildOpenAIClient(config);
-  const cache = await loadCache(cachePath, LEGACY_CACHE_PATH);
+  const cache = await loadCache(cachePath, getLegacyDestinationCachePath(config), LEGACY_CACHE_PATH);
 
-  const files = await collectFiles(config, args.limit);
+  const files = await collectFiles(config);
   console.log(`Found ${files.length} media files.`);
   const dedupedFiles = await dedupeFiles(files, cache);
   console.log(
     `Deduplicated to ${dedupedFiles.uniqueFiles.length} unique media files; skipped ${dedupedFiles.duplicates.length} duplicates.`,
   );
 
-  const metadata = await readMetadata(dedupedFiles.uniqueFiles, config);
+  const filesToProcess = limitFilesToProcess(dedupedFiles.uniqueFiles, args.limit);
+  if (args.limit !== undefined) {
+    console.log(`Limited processing to ${filesToProcess.length} unique media files.`);
+  }
+
+  const metadata = await readMetadata(filesToProcess, config);
   console.log(`Resolved metadata for ${metadata.length} files.`);
 
   const enriched = await enrichLocations(metadata, config, cache);
@@ -168,7 +190,19 @@ async function main() {
   );
 }
 
-function parseArgs(args: string[]) {
+async function resolveDefaultConfigPath() {
+  if (await fileExists(DEFAULT_CONFIG_PATH)) {
+    return DEFAULT_CONFIG_PATH;
+  }
+
+  if (await fileExists(LEGACY_CONFIG_PATH)) {
+    return LEGACY_CONFIG_PATH;
+  }
+
+  return DEFAULT_CONFIG_PATH;
+}
+
+export function parseArgs(args: string[]): CliArgs {
   let execute = false;
   let dryRun = false;
   let configPath: string | undefined;
@@ -194,12 +228,21 @@ function parseArgs(args: string[]) {
     }
 
     if (arg === "--limit") {
-      limit = Number.parseInt(args[index + 1] ?? "", 10);
+      limit = parsePositiveIntegerFlag("--limit", args[index + 1]);
       index += 1;
     }
   }
 
   return { execute: execute && !dryRun, dryRun, configPath, limit };
+}
+
+export function parsePositiveIntegerFlag(flag: string, value: string | undefined) {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (!value || !Number.isSafeInteger(parsed) || parsed < 1 || String(parsed) !== value) {
+    throw new Error(`${flag} requires a positive integer value.`);
+  }
+
+  return parsed;
 }
 
 async function loadConfig(configPath: string, execute: boolean): Promise<Config> {
@@ -234,7 +277,9 @@ function applyEnvironmentOverrides(config: Config): Config {
 
 async function prepareDestinationLocationConfig(config: Config, execute: boolean): Promise<Config> {
   const locationConfigPath = path.join(config.outputRoot, LOCATION_CONFIG_FILE_NAME);
-  const destinationLocationConfig = await readLocationConfig(locationConfigPath);
+  const legacyLocationConfigPath = path.join(config.outputRoot, LEGACY_LOCATION_CONFIG_FILE_NAME);
+  const destinationLocationConfig =
+    (await readLocationConfig(locationConfigPath)) ?? (await readLocationConfig(legacyLocationConfigPath));
 
   if (execute) {
     await fs.mkdir(config.outputRoot, { recursive: true });
@@ -288,6 +333,29 @@ function normalizeAliasKey(value: string) {
   return value.trim().toLowerCase();
 }
 
+function formatAliasSummary(aliases: AliasRule[]) {
+  if (aliases.length === 0) {
+    return "none";
+  }
+
+  return aliases
+    .map((alias) => {
+      const parts = [alias.label];
+      if (alias.coordinates) {
+        parts.push(
+          `${alias.coordinates.latitude.toFixed(6)},${alias.coordinates.longitude.toFixed(6)} r=${alias.coordinates.radiusMeters}m`,
+        );
+      }
+
+      if (alias.addressContains?.length) {
+        parts.push(`address=${alias.addressContains.join(" + ")}`);
+      }
+
+      return parts.join(" ");
+    })
+    .join("; ");
+}
+
 function resolveConfiguredPath(value: string, photoRoot: string) {
   return path.isAbsolute(value) ? value : path.join(photoRoot, value);
 }
@@ -296,40 +364,72 @@ function getDestinationCachePath(config: Config) {
   return path.join(config.outputRoot, DESTINATION_CACHE_FILE_NAME);
 }
 
-async function collectFiles(config: Config, limit?: number) {
+function getLegacyDestinationCachePath(config: Config) {
+  return path.join(config.outputRoot, LEGACY_DESTINATION_CACHE_FILE_NAME);
+}
+
+export function limitFilesToProcess(files: SourceFileRecord[], limit?: number) {
+  return limit === undefined ? files : files.slice(0, limit);
+}
+
+export async function collectFiles(config: Config) {
   const supportedExtensions = new Set(config.supportedExtensions.map((value) => value.toLowerCase()));
+  const ignoredFolderNames = buildIgnoredFolderSet(config.ignoreFolders);
   const files: SourceFileRecord[] = [];
-  const maxFiles = limit && limit > 0 ? limit : Number.POSITIVE_INFINITY;
 
   for (const sourceRoot of config.sourceRoots) {
-    await walk(sourceRoot, async (filePath) => {
-      if (files.length >= maxFiles) {
-        return true;
-      }
-
-      const extension = path.extname(filePath).toLowerCase();
-      if (supportedExtensions.has(extension)) {
-        const stat = await fs.stat(filePath);
-        files.push({
-          sourceRoot,
-          filePath,
-          fileName: path.basename(filePath),
-          extension,
-          sizeBytes: stat.size,
-          mtimeMs: stat.mtimeMs,
-        });
-      }
-
-      return files.length >= maxFiles;
-    });
-
-    if (files.length >= maxFiles) {
-      break;
+    if (isIgnoredFolderName(path.basename(sourceRoot), ignoredFolderNames)) {
+      continue;
     }
+
+    await walk(
+      sourceRoot,
+      async (filePath) => {
+        if (hasIgnoredFolderSegment(sourceRoot, filePath, ignoredFolderNames)) {
+          return false;
+        }
+
+        const extension = path.extname(filePath).toLowerCase();
+        if (supportedExtensions.has(extension)) {
+          const stat = await fs.stat(filePath);
+          files.push({
+            sourceRoot,
+            filePath,
+            fileName: path.basename(filePath),
+            extension,
+            sizeBytes: stat.size,
+            mtimeMs: stat.mtimeMs,
+          });
+        }
+
+        return false;
+      },
+      ignoredFolderNames,
+    );
   }
 
   files.sort((left, right) => left.filePath.localeCompare(right.filePath));
   return files;
+}
+
+function buildIgnoredFolderSet(ignoreFolders?: string[]) {
+  return new Set((ignoreFolders ?? DEFAULT_IGNORE_FOLDERS).map(normalizeIgnoredFolderName));
+}
+
+function normalizeIgnoredFolderName(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function isIgnoredFolderName(folderName: string, ignoredFolderNames: Set<string>) {
+  return ignoredFolderNames.has(normalizeIgnoredFolderName(folderName));
+}
+
+function hasIgnoredFolderSegment(sourceRoot: string, filePath: string, ignoredFolderNames: Set<string>) {
+  return path
+    .relative(sourceRoot, filePath)
+    .split(path.sep)
+    .slice(0, -1)
+    .some((segment) => isIgnoredFolderName(segment, ignoredFolderNames));
 }
 
 async function dedupeFiles(files: SourceFileRecord[], cache: CacheFile) {
@@ -405,12 +505,20 @@ async function hashFile(filePath: string) {
   return hash.digest("hex");
 }
 
-async function walk(root: string, onFile: (filePath: string) => Promise<boolean | void>): Promise<boolean> {
+async function walk(
+  root: string,
+  onFile: (filePath: string) => Promise<boolean | void>,
+  ignoredFolderNames: Set<string>,
+): Promise<boolean> {
   const entries = await fs.readdir(root, { withFileTypes: true });
   for (const entry of entries) {
     const fullPath = path.join(root, entry.name);
     if (entry.isDirectory()) {
-      const shouldStop = await walk(fullPath, onFile);
+      if (isIgnoredFolderName(entry.name, ignoredFolderNames)) {
+        continue;
+      }
+
+      const shouldStop = await walk(fullPath, onFile, ignoredFolderNames);
       if (shouldStop) {
         return true;
       }
@@ -737,7 +845,7 @@ out center tags;
   return Array.from(values).slice(0, config.geocoding.nearbyLimit);
 }
 
-function resolveAlias(
+export function resolveAlias(
   latitude: number,
   longitude: number,
   reverse: Partial<ReverseGeocodeResult>,
@@ -750,8 +858,8 @@ function resolveAlias(
     ...(reverse.nearbyFeatures ?? []),
   ]
     .filter((value): value is string => Boolean(value))
-    .join(" ")
-    .toLowerCase();
+    .join(" ");
+  const normalizedHaystack = normalizeAddressText(haystack);
 
   for (const alias of aliases) {
     const coordinateMatch = alias.coordinates
@@ -759,8 +867,10 @@ function resolveAlias(
         alias.coordinates.radiusMeters
       : false;
 
+    const addressFragments = alias.addressContains?.map(normalizeAddressText).filter(Boolean) ?? [];
     const addressMatch =
-      alias.addressContains?.some((fragment) => haystack.includes(fragment.toLowerCase())) ?? false;
+      addressFragments.length > 0 &&
+      addressFragments.every((fragment) => normalizedHaystack.includes(fragment));
 
     if (coordinateMatch || addressMatch) {
       return alias.label;
@@ -770,7 +880,35 @@ function resolveAlias(
   return undefined;
 }
 
-function buildGroups(enriched: Array<{ record: MetadataRecord; context: PlaceContext }>) {
+function normalizeAddressText(value: string) {
+  const abbreviationMap: Record<string, string> = {
+    ave: "avenue",
+    blvd: "boulevard",
+    cir: "circle",
+    ct: "court",
+    dr: "drive",
+    ln: "lane",
+    pkwy: "parkway",
+    pl: "place",
+    rd: "road",
+    st: "street",
+    ter: "terrace",
+    vly: "valley",
+    wy: "way",
+  };
+
+  return value
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .map((part) => abbreviationMap[part] ?? part)
+    .join(" ");
+}
+
+export function buildGroups(enriched: Array<{ record: MetadataRecord; context: PlaceContext }>) {
   const groups = new Map<string, SortGroup>();
 
   for (const item of enriched) {
@@ -922,23 +1060,29 @@ async function choosePlaceLabel(
   }
 }
 
-function normalizeCachedDecision(value: string | PlaceLabelDecision | undefined): PlaceLabelDecision | undefined {
+export function normalizeCachedDecision(value: string | PlaceLabelDecision | undefined): PlaceLabelDecision | undefined {
   if (!value) {
     return undefined;
   }
 
   if (typeof value === "string") {
+    const label = normalizePlaceLabel(value);
     return {
-      label: value,
+      label,
       strategy: "cache",
-      reason: `Reused cached label "${value}" from a previous run.`,
+      reason: `Reused cached label "${label}" from a previous run.`,
     };
   }
 
-  return value;
+  const label = normalizePlaceLabel(value.label);
+  return {
+    ...value,
+    label,
+    reason: value.reason.replaceAll(value.label, label),
+  };
 }
 
-function fallbackPlaceLabel(context: PlaceContext) {
+export function fallbackPlaceLabel(context: PlaceContext) {
   const address = context.reverse?.address ?? {};
   return (
     address.park ||
@@ -949,11 +1093,17 @@ function fallbackPlaceLabel(context: PlaceContext) {
     address.town ||
     address.village ||
     context.reverse?.nearbyFeatures[0] ||
-    "Unknown_Place"
+    MISC_PLACE_LABEL
   );
 }
 
-function slugifyPlace(value: string) {
+function normalizePlaceLabel(value: string) {
+  return value === "Unknown_Place" || value === "Unknown Place" || value.toLowerCase() === "unknown_place"
+    ? MISC_PLACE_LABEL
+    : value;
+}
+
+export function slugifyPlace(value: string) {
   const cleaned = value
     .normalize("NFKD")
     .replace(/[^\w\s-]/g, " ")
@@ -965,7 +1115,7 @@ function slugifyPlace(value: string) {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1));
 
-  return (parts.join("_") || "Unknown_Place").replace(/_+/g, "_");
+  return (parts.join("_") || MISC_PLACE_LABEL).replace(/_+/g, "_");
 }
 
 function localDateKey(value: Date) {
@@ -1129,13 +1279,17 @@ async function mapWithConcurrency<TInput, TOutput>(
   return results;
 }
 
-async function loadCache(cachePath: string, fallbackCachePath?: string): Promise<CacheFile> {
+async function loadCache(cachePath: string, ...fallbackCachePaths: string[]): Promise<CacheFile> {
   const primary = await readCacheFile(cachePath);
   if (primary) {
     return primary;
   }
 
-  if (fallbackCachePath && fallbackCachePath !== cachePath) {
+  for (const fallbackCachePath of fallbackCachePaths) {
+    if (fallbackCachePath === cachePath) {
+      continue;
+    }
+
     const fallback = await readCacheFile(fallbackCachePath);
     if (fallback) {
       return fallback;
@@ -1203,6 +1357,19 @@ function buildOpenAIReason(context: PlaceContext, label: string) {
     : `OpenAI selected "${label}" using the available reverse-geocode context.`;
 }
 
+async function fileExists(filePath: string) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
 function isMissingFileError(error: unknown) {
   return (
     typeof error === "object" &&
@@ -1234,11 +1401,13 @@ function degreesToRadians(value: number) {
   return (value * Math.PI) / 180;
 }
 
-main()
-  .catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await exiftool.end();
-  });
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main()
+    .catch((error) => {
+      console.error(error instanceof Error ? error.message : error);
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await exiftool.end();
+    });
+}

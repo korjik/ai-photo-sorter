@@ -1,6 +1,6 @@
-# Photo Sorter
+# AI Photo Sorter
 
-`photo-sorter` scans unsorted photo and video folders, groups media by capture date and place, and writes the result into a date-and-location hierarchy such as:
+`ai-photo-sorter` scans unsorted photo and video folders, groups media by capture date and place, and writes the result into a date-and-location hierarchy such as:
 
 ```text
 AI-sorted/2025/01-12_Bear_Valley
@@ -48,8 +48,8 @@ For each run, the sorter:
 ## Project Files
 
 - [src/index.ts](/Users/andrew.kozhokaru/Documents/photo-sorter/src/index.ts:1): main CLI and sorting logic
-- [photo-sorter.config.example.json](/Users/andrew.kozhokaru/Documents/photo-sorter/photo-sorter.config.example.json:1): sample config
-- [photo-sorter.config.json](/Users/andrew.kozhokaru/Documents/photo-sorter/photo-sorter.config.json:1): local runtime config
+- [ai-photo-sorter.config.example.json](/Users/andrew.kozhokaru/Documents/photo-sorter/ai-photo-sorter.config.example.json:1): sample config
+- [ai-photo-sorter.config.json](/Users/andrew.kozhokaru/Documents/photo-sorter/ai-photo-sorter.config.json:1): local runtime config
 - [Dockerfile](/Users/andrew.kozhokaru/Documents/photo-sorter/Dockerfile:1): container image
 - [compose.yaml](/Users/andrew.kozhokaru/Documents/photo-sorter/compose.yaml:1): Docker Compose service
 
@@ -58,7 +58,7 @@ For each run, the sorter:
 Create your local config:
 
 ```bash
-cp photo-sorter.config.example.json photo-sorter.config.json
+cp ai-photo-sorter.config.example.json ai-photo-sorter.config.json
 ```
 
 Main config fields:
@@ -68,6 +68,7 @@ Main config fields:
 - `mode`: `hardlink`, `copy`, or `move`
 - `inferenceWindowMinutes`: how far to look for nearby media when inferring missing GPS
 - `supportedExtensions`: file types to scan
+- `ignoreFolders`: folder names to skip while scanning; defaults to `["@eaDir"]`
 - `openai.enabled`: enable or disable AI place naming
 - `openai.model`: OpenAI model name
 - `geocoding.*`: reverse-geocoding and nearby-place lookup settings
@@ -85,13 +86,14 @@ Example:
   "mode": "hardlink",
   "inferenceWindowMinutes": 90,
   "supportedExtensions": [".heic", ".jpg", ".jpeg", ".png", ".mov", ".mp4"],
+  "ignoreFolders": ["@eaDir"],
   "openai": {
     "enabled": true,
     "model": "gpt-5-mini"
   },
   "geocoding": {
     "provider": "nominatim",
-    "userAgent": "photo-sorter/1.0",
+    "userAgent": "ai-photo-sorter/1.0",
     "language": "en",
     "rateLimitMs": 1100,
     "nearbyRadiusMeters": 800,
@@ -116,7 +118,7 @@ Example:
 Aliases can match by:
 
 - coordinate radius
-- address text fragments
+- address text fragments; when an alias lists multiple `addressContains` values, all of them must be present
 - both
 
 When both the destination-local alias file and the main config define the same alias label, the main config wins.
@@ -147,17 +149,17 @@ This hidden JSON file stores:
 The destination root contains two hidden helper files:
 
 ```text
-<DESTINATION>/photo-sorter-location.config.json
-<DESTINATION>/.photo-sorter-cache.json
+<DESTINATION>/ai-photo-sorter-location.config.json
+<DESTINATION>/.ai-photo-sorter-cache.json
 ```
 
-`photo-sorter-location.config.json`:
+`ai-photo-sorter-location.config.json`:
 
 - is bootstrapped automatically on execute runs if missing
 - starts with the `aliases` from your main config
 - can be edited with extra destination-specific aliases
 
-`.photo-sorter-cache.json` stores:
+`.ai-photo-sorter-cache.json` stores:
 
 - reverse geocode results
 - cached place-label decisions
@@ -209,19 +211,21 @@ npm run build
 Dry run:
 
 ```bash
-npx tsx src/index.ts --config photo-sorter.config.json --dry-run
+npx tsx src/index.ts --config ai-photo-sorter.config.json --dry-run
 ```
 
-Sample only part of the library:
+Process only part of the library:
 
 ```bash
-npx tsx src/index.ts --config photo-sorter.config.json --dry-run --limit 100
+npx tsx src/index.ts --config ai-photo-sorter.config.json --dry-run --limit 100
 ```
+
+`--limit` caps the number of unique media items processed after duplicate detection.
 
 Execute:
 
 ```bash
-npx tsx src/index.ts --config photo-sorter.config.json --execute
+npx tsx src/index.ts --config ai-photo-sorter.config.json --execute
 ```
 
 By default, `mode: "hardlink"` keeps the original files in place and creates hard links in the destination tree.
@@ -243,7 +247,7 @@ Dry run prints:
 Build the image:
 
 ```bash
-docker build -t photo-sorter .
+docker build -t ai-photo-sorter .
 ```
 
 Run a dry run with runtime-mounted config:
@@ -255,8 +259,8 @@ docker run --rm \
   -e SOURCE_ROOTS="Unsorted/SourceA:Unsorted/SourceB" \
   -e DESTINATION="AI-sorted" \
   -v /absolute/path/to/photo-root:/photo \
-  -v "$(pwd)/photo-sorter.config.json:/app/photo-sorter.config.json:ro" \
-  photo-sorter --config /app/photo-sorter.config.json --dry-run
+  -v "$(pwd)/ai-photo-sorter.config.json:/app/ai-photo-sorter.config.json:ro" \
+  ai-photo-sorter --config /app/ai-photo-sorter.config.json --dry-run
 ```
 
 Execute:
@@ -268,8 +272,8 @@ docker run --rm \
   -e SOURCE_ROOTS="Unsorted/SourceA:Unsorted/SourceB" \
   -e DESTINATION="AI-sorted" \
   -v /absolute/path/to/photo-root:/photo \
-  -v "$(pwd)/photo-sorter.config.json:/app/photo-sorter.config.json:ro" \
-  photo-sorter --config /app/photo-sorter.config.json --execute
+  -v "$(pwd)/ai-photo-sorter.config.json:/app/ai-photo-sorter.config.json:ro" \
+  ai-photo-sorter --config /app/ai-photo-sorter.config.json --execute
 ```
 
 Notes:
@@ -277,7 +281,9 @@ Notes:
 - `PHOTO_ROOT` defaults to `/photo`
 - `SOURCE_ROOTS` is colon-separated
 - relative source and destination paths are resolved under `PHOTO_ROOT`
-- `photo-sorter.config.json` is not baked into the image
+- the image includes `/app/ai-photo-sorter.config.json` copied from your local build context
+- do not push the image publicly if your config contains private locations
+- you can still mount a different config over `/app/ai-photo-sorter.config.json` when needed
 
 ## Docker Compose
 
@@ -295,25 +301,25 @@ export OPENAI_API_KEY="your_api_key_here"
 Dry run:
 
 ```bash
-docker compose run --rm photo-sorter
+docker compose run --rm ai-photo-sorter
 ```
 
 Execute:
 
 ```bash
-docker compose run --rm photo-sorter --config /app/photo-sorter.config.json --execute
+docker compose run --rm ai-photo-sorter --config /app/ai-photo-sorter.config.json --execute
 ```
 
-Sample only part of the library:
+Process only part of the library:
 
 ```bash
-docker compose run --rm photo-sorter --config /app/photo-sorter.config.json --dry-run --limit 100
+docker compose run --rm ai-photo-sorter --config /app/ai-photo-sorter.config.json --dry-run --limit 100
 ```
 
 Compose mounts:
 
 - your host photo root at `/photo`
-- your local `photo-sorter.config.json` into the container at `/app/photo-sorter.config.json`
+- your local `ai-photo-sorter.config.json` into the container at `/app/ai-photo-sorter.config.json`
 
 ## Troubleshooting
 

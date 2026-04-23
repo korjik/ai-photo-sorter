@@ -17,13 +17,16 @@
     ".mp4",
     ".png"
   ],
+  "ignoreFolders": [
+    "@eaDir"
+  ],
   "openai": {
     "enabled": true,
     "model": "gpt-5-mini"
   },
   "geocoding": {
     "provider": "nominatim",
-    "userAgent": "photo-sorter/1.0",
+    "userAgent": "ai-photo-sorter/1.0",
     "language": "en",
     "rateLimitMs": 1100,
     "nearbyRadiusMeters": 800,

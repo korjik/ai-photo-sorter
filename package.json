@@ -1,10 +1,11 @@
 {
-  "name": "photo-sorter",
+  "name": "ai-photo-sorter",
   "version": "1.0.0",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "rtk proxy tsc -p tsconfig.json",
+    "test": "rtk proxy node --import tsx --test test/*.test.ts",
     "start": "rtk proxy tsx src/index.ts",
     "sort": "rtk proxy tsx src/index.ts"
   },

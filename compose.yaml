@@ -1,8 +1,8 @@
 services:
-  photo-sorter:
+  ai-photo-sorter:
     build:
       context: .
-    image: photo-sorter:latest
+    image: ai-photo-sorter:latest
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       PHOTO_ROOT: /photo
@@ -10,5 +10,5 @@ services:
       DESTINATION: ${DESTINATION:-AI-sorted}
     volumes:
       - ${HOST_PHOTO_ROOT:?Set HOST_PHOTO_ROOT to the host photo library root}:/photo
-      - ./photo-sorter.config.json:/app/photo-sorter.config.json:ro
-    command: ["--config", "/app/photo-sorter.config.json", "--dry-run"]
+      - ./ai-photo-sorter.config.json:/app/ai-photo-sorter.config.json:ro
+    command: ["--config", "/app/ai-photo-sorter.config.json", "--dry-run"]

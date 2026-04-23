@@ -3,4 +3,3 @@ dist
 .cache
 .env
 npm-debug.log
-photo-sorter.config.json

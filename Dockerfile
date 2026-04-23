@@ -7,7 +7,8 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src
-COPY photo-sorter.config.example.json ./
+COPY ai-photo-sorter.config.example.json ./
+COPY ai-photo-sorter.config.json ./
 RUN npx tsc -p tsconfig.json
 
 FROM node:20-bookworm-slim
@@ -22,7 +23,8 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 
 COPY --from=build /app/dist ./dist
-COPY --from=build /app/photo-sorter.config.example.json ./photo-sorter.config.example.json
+COPY --from=build /app/ai-photo-sorter.config.example.json ./ai-photo-sorter.config.example.json
+COPY --from=build /app/ai-photo-sorter.config.json ./ai-photo-sorter.config.json
 
 ENTRYPOINT ["node", "dist/index.js"]
-CMD ["--config", "photo-sorter.config.example.json", "--dry-run"]
+CMD ["--config", "ai-photo-sorter.config.json", "--dry-run"]
