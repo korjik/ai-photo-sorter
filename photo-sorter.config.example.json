@@ -1,0 +1,58 @@
+{
+  "sourceRoots": [
+    "/path/to/photo-root/Unsorted/SourceA",
+    "/path/to/photo-root/Unsorted/SourceB"
+  ],
+  "outputRoot": "/path/to/photo-root/AI-sorted",
+  "mode": "hardlink",
+  "inferenceWindowMinutes": 90,
+  "supportedExtensions": [
+    ".3gp",
+    ".avi",
+    ".heic",
+    ".jpeg",
+    ".jpg",
+    ".m4v",
+    ".mov",
+    ".mp4",
+    ".png"
+  ],
+  "openai": {
+    "enabled": true,
+    "model": "gpt-5-mini"
+  },
+  "geocoding": {
+    "provider": "nominatim",
+    "userAgent": "photo-sorter/1.0",
+    "language": "en",
+    "rateLimitMs": 1100,
+    "nearbyRadiusMeters": 800,
+    "nearbyLimit": 8
+  },
+  "aliases": [
+    {
+      "label": "Home",
+      "coordinates": {
+        "latitude": 37.000001,
+        "longitude": -122.000001,
+        "radiusMeters": 300
+      },
+      "addressContains": [
+        "123 Example Street",
+        "Example City"
+      ]
+    },
+    {
+      "label": "Cabin",
+      "coordinates": {
+        "latitude": 38.000001,
+        "longitude": -120.000001,
+        "radiusMeters": 500
+      },
+      "addressContains": [
+        "456 Example Road",
+        "Example Town"
+      ]
+    }
+  ]
+}
