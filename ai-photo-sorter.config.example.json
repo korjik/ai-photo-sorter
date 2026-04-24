@@ -20,6 +20,7 @@
   "ignoreFolders": [
     "@eaDir"
   ],
+  "labelRewrites": [],
   "openai": {
     "enabled": true,
     "model": "gpt-5-mini"

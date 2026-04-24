@@ -21,6 +21,11 @@ type AliasRule = {
   addressContains?: string[];
 };
 
+type LabelRewriteRule = {
+  label: string;
+  matchContains: string[];
+};
+
 type Config = {
   sourceRoots: string[];
   outputRoot: string;
@@ -28,6 +33,7 @@ type Config = {
   inferenceWindowMinutes: number;
   supportedExtensions: string[];
   ignoreFolders?: string[];
+  labelRewrites?: LabelRewriteRule[];
   openai: {
     enabled: boolean;
     model: string;
@@ -131,8 +137,7 @@ const placeLabelSchema = z.object({
     .describe("Human-friendly place label like Bear Valley, Home, or Golden Gate Park."),
 });
 
-const DEFAULT_CONFIG_PATH = path.resolve(process.cwd(), "ai-photo-sorter.config.json");
-const LEGACY_CONFIG_PATH = path.resolve(process.cwd(), "photo-sorter.config.json");
+const DEFAULT_CONFIG_PATH = "/config/ai-photo-sorter.config.json";
 const LEGACY_CACHE_PATH = path.resolve(process.cwd(), ".cache", "photo-sorter-cache.json");
 const DEFAULT_PHOTO_ROOT = "/photo";
 const LOCATION_CONFIG_FILE_NAME = "ai-photo-sorter-location.config.json";
@@ -145,8 +150,7 @@ const MISC_PLACE_LABEL = "Misc";
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const defaultConfigPath = await resolveDefaultConfigPath();
-  const configPath = path.resolve(process.cwd(), args.configPath ?? defaultConfigPath);
+  const configPath = path.resolve(process.cwd(), args.configPath ?? DEFAULT_CONFIG_PATH);
   const execute = args.execute;
   const config = await loadConfig(configPath, execute);
   console.log(`Loaded config: ${configPath}`);
@@ -188,18 +192,6 @@ async function main() {
   console.log(
     `Completed. Organized ${metadata.length} unique files into ${config.outputRoot}. Skipped ${dedupedFiles.duplicates.length} duplicates.`,
   );
-}
-
-async function resolveDefaultConfigPath() {
-  if (await fileExists(DEFAULT_CONFIG_PATH)) {
-    return DEFAULT_CONFIG_PATH;
-  }
-
-  if (await fileExists(LEGACY_CONFIG_PATH)) {
-    return LEGACY_CONFIG_PATH;
-  }
-
-  return DEFAULT_CONFIG_PATH;
 }
 
 export function parseArgs(args: string[]): CliArgs {
@@ -246,9 +238,23 @@ export function parsePositiveIntegerFlag(flag: string, value: string | undefined
 }
 
 async function loadConfig(configPath: string, execute: boolean): Promise<Config> {
-  const raw = await fs.readFile(configPath, "utf8");
+  const raw = await readConfigFile(configPath);
   const parsed = applyEnvironmentOverrides(JSON.parse(raw) as Config);
   return prepareDestinationLocationConfig(parsed, execute);
+}
+
+export async function readConfigFile(configPath: string) {
+  try {
+    return await fs.readFile(configPath, "utf8");
+  } catch (error) {
+    if (isMissingFileError(error) && configPath === DEFAULT_CONFIG_PATH) {
+      throw new Error(
+        `Config file not found at ${DEFAULT_CONFIG_PATH}. Mount a folder containing ai-photo-sorter.config.json to /config, or pass --config /path/to/config.json.`,
+      );
+    }
+
+    throw error;
+  }
 }
 
 function applyEnvironmentOverrides(config: Config): Config {
@@ -958,7 +964,11 @@ async function labelGroups(
   const labeled: LabeledGroup[] = [];
 
   for (const group of groups) {
-    const decision = await choosePlaceLabel(group, config, cache, openaiClient);
+    const decision = rewritePlaceDecision(
+      await choosePlaceLabel(group, config, cache, openaiClient),
+      group,
+      config.labelRewrites ?? [],
+    );
     labeled.push({
       ...group,
       placeLabel: decision.label,
@@ -968,6 +978,48 @@ async function labelGroups(
   }
 
   return labeled;
+}
+
+export function rewritePlaceDecision(
+  decision: PlaceLabelDecision,
+  group: SortGroup,
+  labelRewrites: LabelRewriteRule[],
+): PlaceLabelDecision {
+  const rewrite = resolveLabelRewrite(decision.label, group.context, labelRewrites);
+  if (!rewrite || rewrite.label === decision.label) {
+    return decision;
+  }
+
+  return {
+    label: rewrite.label,
+    strategy: decision.strategy,
+    reason: `${decision.reason} Rewritten to "${rewrite.label}" because location context matched "${rewrite.matchedFragment}".`,
+  };
+}
+
+function resolveLabelRewrite(label: string, context: PlaceContext, labelRewrites: LabelRewriteRule[]) {
+  const haystack = normalizeAddressText(
+    [
+      label,
+      context.reverse?.displayName,
+      ...Object.values(context.reverse?.address ?? {}),
+      ...Object.values(context.reverse?.namedetails ?? {}),
+      ...(context.reverse?.nearbyFeatures ?? []),
+    ]
+      .filter((value): value is string => Boolean(value))
+      .join(" "),
+  );
+
+  for (const rewrite of labelRewrites) {
+    const matchedFragment = rewrite.matchContains.find((fragment) =>
+      haystack.includes(normalizeAddressText(fragment)),
+    );
+    if (matchedFragment) {
+      return { label: rewrite.label, matchedFragment };
+    }
+  }
+
+  return undefined;
 }
 
 async function choosePlaceLabel(
@@ -1015,8 +1067,7 @@ async function choosePlaceLabel(
       input: [
         {
           role: "system",
-          content:
-            "You name family photo folders. Return a short place label only. Prefer a park, venue, neighborhood, alias-like home label, or well-known place. Avoid street numbers unless nothing else is meaningful. Use 1 to 4 words.",
+          content: buildPlaceLabelInstructions(),
         },
         {
           role: "user",
@@ -1058,6 +1109,18 @@ async function choosePlaceLabel(
     cache.aiPlaceLabels[cacheKey] = decision;
     return decision;
   }
+}
+
+export function buildPlaceLabelInstructions() {
+  return [
+    "You name family photo folders. Return a short place label only.",
+    "Prefer the broadest useful destination people would use to describe the trip or outing.",
+    "If the context appears to be inside a national park, state park, large regional park, monument, resort, campus, or major venue, prefer that larger named place over a trail, campground, lodge, parking lot, building, viewpoint, or sub-area.",
+    "For example, if the context contains Yosemite Village, Yosemite Lodge, Yosemite Falls, or Yosemite Valley Backpackers Campground, choose Yosemite National Park.",
+    "Use specific sublocations only when no broader recognizable destination is evident.",
+    "Avoid street numbers unless nothing else is meaningful.",
+    "Use 1 to 4 words.",
+  ].join(" ");
 }
 
 export function normalizeCachedDecision(value: string | PlaceLabelDecision | undefined): PlaceLabelDecision | undefined {
@@ -1355,19 +1418,6 @@ function buildOpenAIReason(context: PlaceContext, label: string) {
   return supportingContext
     ? `OpenAI selected "${label}" using reverse-geocode context: ${supportingContext}.`
     : `OpenAI selected "${label}" using the available reverse-geocode context.`;
-}
-
-async function fileExists(filePath: string) {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch (error) {
-    if (isMissingFileError(error)) {
-      return false;
-    }
-
-    throw error;
-  }
 }
 
 function isMissingFileError(error: unknown) {

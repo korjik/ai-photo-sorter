@@ -6,13 +6,16 @@ import test from "node:test";
 
 import {
   buildGroups,
+  buildPlaceLabelInstructions,
   collectFiles,
   fallbackPlaceLabel,
   limitFilesToProcess,
   normalizeCachedDecision,
   parseArgs,
   parsePositiveIntegerFlag,
+  readConfigFile,
   resolveAlias,
+  rewritePlaceDecision,
   slugifyPlace,
 } from "../src/index.ts";
 
@@ -98,6 +101,25 @@ test("parsePositiveIntegerFlag rejects invalid values", () => {
   assert.throws(() => parsePositiveIntegerFlag("--limit", "-1"), /positive integer/);
   assert.throws(() => parsePositiveIntegerFlag("--limit", "1.5"), /positive integer/);
   assert.throws(() => parsePositiveIntegerFlag("--limit", "abc"), /positive integer/);
+});
+
+test("readConfigFile explains missing default /config mount", async () => {
+  await assert.rejects(
+    readConfigFile("/config/ai-photo-sorter.config.json"),
+    /Mount a folder containing ai-photo-sorter\.config\.json to \/config/,
+  );
+});
+
+test("readConfigFile reads an explicit config path", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ai-photo-sorter-"));
+  try {
+    const configPath = path.join(root, "custom.config.json");
+    await fs.writeFile(configPath, "{}");
+
+    assert.equal(await readConfigFile(configPath), "{}");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test("limitFilesToProcess caps the unique processing queue without mutating it", () => {
@@ -268,6 +290,67 @@ test("normalizeCachedDecision maps legacy Unknown_Place labels to Misc", () => {
     })?.label,
     "Misc",
   );
+});
+
+test("rewritePlaceDecision generalizes labels from selected label text", () => {
+  const group = buildGroups([
+    {
+      record: metadata("trail.jpg", new Date("2025-07-27T18:00:00.000Z")),
+      context: {
+        reverse: {
+          displayName: "Example Village, Example County, United States",
+          nearbyFeatures: [],
+        },
+      },
+    },
+  ])[0];
+
+  const decision = rewritePlaceDecision(
+    {
+      label: "Example Falls Trail",
+      strategy: "openai",
+      reason: 'OpenAI selected "Example Falls Trail".',
+    },
+    group,
+    [{ label: "Example National Park", matchContains: ["Example Falls"] }],
+  );
+
+  assert.equal(decision.label, "Example National Park");
+  assert.match(decision.reason, /Rewritten to "Example National Park"/);
+});
+
+test("rewritePlaceDecision generalizes labels from reverse-geocode context", () => {
+  const group = buildGroups([
+    {
+      record: metadata("camp.jpg", new Date("2025-07-27T18:00:00.000Z")),
+      context: {
+        reverse: {
+          displayName: "Example Valley Backpackers Campground, Example National Park, United States",
+          nearbyFeatures: [],
+        },
+      },
+    },
+  ])[0];
+
+  const decision = rewritePlaceDecision(
+    {
+      label: "Backpackers Campground",
+      strategy: "cache",
+      reason: 'Reused cached label "Backpackers Campground" from a previous run.',
+    },
+    group,
+    [{ label: "Example National Park", matchContains: ["Example National Park"] }],
+  );
+
+  assert.equal(decision.label, "Example National Park");
+});
+
+test("buildPlaceLabelInstructions asks OpenAI to prefer broader destinations", () => {
+  const instructions = buildPlaceLabelInstructions();
+
+  assert.match(instructions, /broadest useful destination/);
+  assert.match(instructions, /national park/);
+  assert.match(instructions, /trail, campground, lodge/);
 });
 
 test("collectFiles ignores @eaDir folders by default", async () => {

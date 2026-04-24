@@ -52,6 +52,7 @@ For each run, the sorter:
 - [ai-photo-sorter.config.json](/Users/andrew.kozhokaru/Documents/photo-sorter/ai-photo-sorter.config.json:1): local runtime config
 - [Dockerfile](/Users/andrew.kozhokaru/Documents/photo-sorter/Dockerfile:1): container image
 - [compose.yaml](/Users/andrew.kozhokaru/Documents/photo-sorter/compose.yaml:1): Docker Compose service
+- [SYNOLOGY.md](/Users/andrew.kozhokaru/Documents/photo-sorter/SYNOLOGY.md:1): Synology NAS installation guide
 
 ## Configuration
 
@@ -69,6 +70,7 @@ Main config fields:
 - `inferenceWindowMinutes`: how far to look for nearby media when inferring missing GPS
 - `supportedExtensions`: file types to scan
 - `ignoreFolders`: folder names to skip while scanning; defaults to `["@eaDir"]`
+- `labelRewrites`: optional rules that generalize selected labels when text appears in the label or reverse-geocode context
 - `openai.enabled`: enable or disable AI place naming
 - `openai.model`: OpenAI model name
 - `geocoding.*`: reverse-geocoding and nearby-place lookup settings
@@ -87,6 +89,12 @@ Example:
   "inferenceWindowMinutes": 90,
   "supportedExtensions": [".heic", ".jpg", ".jpeg", ".png", ".mov", ".mp4"],
   "ignoreFolders": ["@eaDir"],
+  "labelRewrites": [
+    {
+      "label": "Yosemite National Park",
+      "matchContains": ["Yosemite"]
+    }
+  ],
   "openai": {
     "enabled": true,
     "model": "gpt-5-mini"
@@ -149,11 +157,11 @@ This hidden JSON file stores:
 The destination root contains two hidden helper files:
 
 ```text
-<DESTINATION>/ai-photo-sorter-location.config.json
+<DESTINATION>/.ai-photo-sorter-location.config.json
 <DESTINATION>/.ai-photo-sorter-cache.json
 ```
 
-`ai-photo-sorter-location.config.json`:
+`.ai-photo-sorter-location.config.json`:
 
 - is bootstrapped automatically on execute runs if missing
 - starts with the `aliases` from your main config
@@ -259,8 +267,8 @@ docker run --rm \
   -e SOURCE_ROOTS="Unsorted/SourceA:Unsorted/SourceB" \
   -e DESTINATION="AI-sorted" \
   -v /absolute/path/to/photo-root:/photo \
-  -v "$(pwd)/ai-photo-sorter.config.json:/app/ai-photo-sorter.config.json:ro" \
-  ai-photo-sorter --config /app/ai-photo-sorter.config.json --dry-run
+  -v "$(pwd):/config:ro" \
+  ai-photo-sorter --dry-run
 ```
 
 Execute:
@@ -272,8 +280,8 @@ docker run --rm \
   -e SOURCE_ROOTS="Unsorted/SourceA:Unsorted/SourceB" \
   -e DESTINATION="AI-sorted" \
   -v /absolute/path/to/photo-root:/photo \
-  -v "$(pwd)/ai-photo-sorter.config.json:/app/ai-photo-sorter.config.json:ro" \
-  ai-photo-sorter --config /app/ai-photo-sorter.config.json --execute
+  -v "$(pwd):/config:ro" \
+  ai-photo-sorter --execute
 ```
 
 Notes:
@@ -281,9 +289,9 @@ Notes:
 - `PHOTO_ROOT` defaults to `/photo`
 - `SOURCE_ROOTS` is colon-separated
 - relative source and destination paths are resolved under `PHOTO_ROOT`
-- the image includes `/app/ai-photo-sorter.config.json` copied from your local build context
-- do not push the image publicly if your config contains private locations
-- you can still mount a different config over `/app/ai-photo-sorter.config.json` when needed
+- the container requires `/config/ai-photo-sorter.config.json`
+- mount the folder containing `ai-photo-sorter.config.json` to `/config`
+- you can override the config path with `--config /path/to/config.json` when needed
 
 ## Docker Compose
 
@@ -293,6 +301,7 @@ Set environment variables before running Compose:
 
 ```bash
 export HOST_PHOTO_ROOT="/absolute/path/to/photo-root"
+export HOST_CONFIG_DIR="$(pwd)"
 export SOURCE_ROOTS="Unsorted/SourceA:Unsorted/SourceB"
 export DESTINATION="AI-sorted"
 export OPENAI_API_KEY="your_api_key_here"
@@ -307,19 +316,19 @@ docker compose run --rm ai-photo-sorter
 Execute:
 
 ```bash
-docker compose run --rm ai-photo-sorter --config /app/ai-photo-sorter.config.json --execute
+docker compose run --rm ai-photo-sorter --execute
 ```
 
 Process only part of the library:
 
 ```bash
-docker compose run --rm ai-photo-sorter --config /app/ai-photo-sorter.config.json --dry-run --limit 100
+docker compose run --rm ai-photo-sorter --dry-run --limit 100
 ```
 
 Compose mounts:
 
 - your host photo root at `/photo`
-- your local `ai-photo-sorter.config.json` into the container at `/app/ai-photo-sorter.config.json`
+- `HOST_CONFIG_DIR` at `/config`; it must contain `ai-photo-sorter.config.json`
 
 ## Troubleshooting
 

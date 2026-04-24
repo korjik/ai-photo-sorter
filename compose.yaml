@@ -10,5 +10,5 @@ services:
       DESTINATION: ${DESTINATION:-AI-sorted}
     volumes:
       - ${HOST_PHOTO_ROOT:?Set HOST_PHOTO_ROOT to the host photo library root}:/photo
-      - ./ai-photo-sorter.config.json:/app/ai-photo-sorter.config.json:ro
-    command: ["--config", "/app/ai-photo-sorter.config.json", "--dry-run"]
+      - ${HOST_CONFIG_DIR:-.}:/config:ro
+    command: ["--dry-run"]
