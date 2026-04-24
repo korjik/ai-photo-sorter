@@ -157,11 +157,11 @@ This hidden JSON file stores:
 The destination root contains two hidden helper files:
 
 ```text
-<DESTINATION>/.ai-photo-sorter-location.config.json
+<DESTINATION>/ai-photo-sorter-location.config.json
 <DESTINATION>/.ai-photo-sorter-cache.json
 ```
 
-`.ai-photo-sorter-location.config.json`:
+`ai-photo-sorter-location.config.json`:
 
 - is bootstrapped automatically on execute runs if missing
 - starts with the `aliases` from your main config
