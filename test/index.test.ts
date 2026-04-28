@@ -8,11 +8,15 @@ import {
   buildGroups,
   buildPlaceLabelInstructions,
   collectFiles,
+  deleteSourceFiles,
   fallbackPlaceLabel,
+  findDestinationDuplicates,
+  chooseShortestNameCanonical,
   limitFilesToProcess,
   normalizeCachedDecision,
   parseArgs,
   parsePositiveIntegerFlag,
+  placeFile,
   readConfigFile,
   resolveAlias,
   rewritePlaceDecision,
@@ -71,6 +75,8 @@ test("parseArgs reads --limit as a positive integer", () => {
     {
       execute: false,
       dryRun: true,
+      deleteSource: false,
+      dedupOnly: false,
       configPath: "ai-photo-sorter.config.json",
       limit: 100,
     },
@@ -81,6 +87,8 @@ test("parseArgs lets --dry-run override --execute", () => {
   assert.deepEqual(parseArgs(["--execute", "--dry-run", "--limit", "2"]), {
     execute: false,
     dryRun: true,
+    deleteSource: false,
+    dedupOnly: false,
     configPath: undefined,
     limit: 2,
   });
@@ -90,6 +98,30 @@ test("parseArgs enables execute mode without dry-run", () => {
   assert.deepEqual(parseArgs(["--execute"]), {
     execute: true,
     dryRun: false,
+    deleteSource: false,
+    dedupOnly: false,
+    configPath: undefined,
+    limit: undefined,
+  });
+});
+
+test("parseArgs enables source deletion with --delete", () => {
+  assert.deepEqual(parseArgs(["--execute", "--delete"]), {
+    execute: true,
+    dryRun: false,
+    deleteSource: true,
+    dedupOnly: false,
+    configPath: undefined,
+    limit: undefined,
+  });
+});
+
+test("parseArgs enables dedup-only mode", () => {
+  assert.deepEqual(parseArgs(["--dedup-only", "--execute"]), {
+    execute: true,
+    dryRun: false,
+    deleteSource: false,
+    dedupOnly: true,
     configPath: undefined,
     limit: undefined,
   });
@@ -134,6 +166,120 @@ test("limitFilesToProcess returns all files when the limit is larger than the qu
   const files = [sourceFile("a.jpg"), sourceFile("b.jpg")];
 
   assert.deepEqual(limitFilesToProcess(files, 10), files);
+});
+
+test("placeFile deletes source after successful copy when requested", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ai-photo-sorter-"));
+  try {
+    const sourcePath = path.join(root, "source.jpg");
+    const targetPath = path.join(root, "target.jpg");
+    await fs.writeFile(sourcePath, "image");
+
+    await placeFile(sourcePath, targetPath, "copy", true);
+
+    assert.equal(await fs.readFile(targetPath, "utf8"), "image");
+    await assert.rejects(fs.access(sourcePath), /ENOENT/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("placeFile keeps source after copy by default", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ai-photo-sorter-"));
+  try {
+    const sourcePath = path.join(root, "source.jpg");
+    const targetPath = path.join(root, "target.jpg");
+    await fs.writeFile(sourcePath, "image");
+
+    await placeFile(sourcePath, targetPath, "copy");
+
+    assert.equal(await fs.readFile(sourcePath, "utf8"), "image");
+    assert.equal(await fs.readFile(targetPath, "utf8"), "image");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("placeFile deletes source after successful hardlink when requested", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ai-photo-sorter-"));
+  try {
+    const sourcePath = path.join(root, "source.jpg");
+    const targetPath = path.join(root, "target.jpg");
+    await fs.writeFile(sourcePath, "image");
+
+    await placeFile(sourcePath, targetPath, "hardlink", true);
+
+    assert.equal(await fs.readFile(targetPath, "utf8"), "image");
+    await assert.rejects(fs.access(sourcePath), /ENOENT/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("deleteSourceFiles deletes skipped duplicate source paths", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ai-photo-sorter-"));
+  try {
+    const firstPath = path.join(root, "duplicate-a.jpg");
+    const secondPath = path.join(root, "duplicate-b.jpg");
+    await fs.writeFile(firstPath, "image");
+    await fs.writeFile(secondPath, "image");
+
+    await deleteSourceFiles([{ filePath: firstPath }, { filePath: secondPath }]);
+
+    await assert.rejects(fs.access(firstPath), /ENOENT/);
+    await assert.rejects(fs.access(secondPath), /ENOENT/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("chooseShortestNameCanonical keeps the shortest filename", () => {
+  const files = [
+    sourceFile("longer-name.jpg"),
+    sourceFile("a.jpg"),
+    sourceFile("same.jpg"),
+  ];
+
+  assert.equal(chooseShortestNameCanonical(files).fileName, "a.jpg");
+});
+
+test("chooseShortestNameCanonical uses stable sorting for equal name lengths", () => {
+  const files = [sourceFile("b.jpg"), sourceFile("a.jpg")];
+
+  assert.equal(chooseShortestNameCanonical(files).fileName, "a.jpg");
+});
+
+test("findDestinationDuplicates marks exact duplicates except the shortest filename", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ai-photo-sorter-"));
+  try {
+    const destination = path.join(root, "AI-sorted");
+    const folder = path.join(destination, "2025", "01-12_Home");
+    await fs.mkdir(folder, { recursive: true });
+
+    const keepPath = path.join(folder, "a.jpg");
+    const duplicatePath = path.join(folder, "longer-name.jpg");
+    const differentPath = path.join(folder, "different.jpg");
+    await fs.writeFile(keepPath, "same image");
+    await fs.writeFile(duplicatePath, "same image");
+    await fs.writeFile(differentPath, "other image");
+
+    const files = await collectFiles(config(destination));
+    const duplicates = await findDestinationDuplicates(files, {
+      reverseGeocode: {},
+      aiPlaceLabels: {},
+      fileHashes: {},
+    });
+
+    assert.deepEqual(
+      duplicates.map((duplicate) => ({
+        fileName: duplicate.fileName,
+        keepFileName: duplicate.keepFileName,
+      })),
+      [{ fileName: "longer-name.jpg", keepFileName: "a.jpg" }],
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test("buildGroups formats month and day with a dash", () => {

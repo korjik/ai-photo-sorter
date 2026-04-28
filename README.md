@@ -17,6 +17,7 @@ It uses local metadata first, then location lookup, then configurable aliases, a
 - Supports configurable aliases such as `Home`, `Cabin`, `Office`, or `School`
 - Uses OpenAI to choose concise folder labels when enabled
 - Deduplicates exact duplicate files across multiple source roots
+- Can run destination-only deduplication without config, EXIF, geocoding, or OpenAI
 - Writes folder-level provenance into hidden `.ai-sorted` files
 - Stores reusable caches in the destination root so repeated runs avoid repeated location work
 - Supports local execution, Docker, and Docker Compose
@@ -186,6 +187,14 @@ Duplicates are detected by:
 
 Dry-run output includes the duplicate source file and the canonical file it matched.
 
+Destination-only deduplication is also available with `--dedup-only`. This mode:
+
+- only reads `PHOTO_ROOT` and `DESTINATION`
+- scans existing media files under the destination
+- groups exact duplicates by file size and SHA-256 hash
+- keeps the copy with the shortest filename
+- dry-runs by default and deletes duplicate files only with `--execute`
+
 ## OpenAI API Key
 
 The sorter reads the OpenAI key from:
@@ -237,6 +246,26 @@ npx tsx src/index.ts --config ai-photo-sorter.config.json --execute
 ```
 
 By default, `mode: "hardlink"` keeps the original files in place and creates hard links in the destination tree.
+
+Execute and delete source files after the unique files have been successfully placed in the destination:
+
+```bash
+npx tsx src/index.ts --config ai-photo-sorter.config.json --execute --delete
+```
+
+`--delete` only applies during `--execute` runs. It deletes both organized unique source files and skipped duplicate source files.
+
+Dedup only the destination tree:
+
+```bash
+PHOTO_ROOT="/path/to/photo-root" DESTINATION="AI-sorted" npx tsx src/index.ts --dedup-only
+```
+
+Delete destination duplicates after reviewing the plan:
+
+```bash
+PHOTO_ROOT="/path/to/photo-root" DESTINATION="AI-sorted" npx tsx src/index.ts --dedup-only --execute
+```
 
 ## Dry Run Output
 
@@ -292,6 +321,7 @@ Notes:
 - the container requires `/config/ai-photo-sorter.config.json`
 - mount the folder containing `ai-photo-sorter.config.json` to `/config`
 - you can override the config path with `--config /path/to/config.json` when needed
+- `--dedup-only` does not require `SOURCE_ROOTS`, `OPENAI_API_KEY`, or a mounted config file
 
 ## Docker Compose
 
@@ -323,6 +353,13 @@ Process only part of the library:
 
 ```bash
 docker compose run --rm ai-photo-sorter --dry-run --limit 100
+```
+
+Dedup only the destination tree:
+
+```bash
+docker compose run --rm ai-photo-sorter --dedup-only
+docker compose run --rm ai-photo-sorter --dedup-only --execute
 ```
 
 Compose mounts:

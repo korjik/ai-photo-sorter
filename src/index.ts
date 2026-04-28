@@ -77,6 +77,12 @@ type DuplicateFileRecord = SourceFileRecord & {
   contentHash: string;
 };
 
+type DestinationDuplicateFileRecord = SourceFileRecord & {
+  keepFilePath: string;
+  keepFileName: string;
+  contentHash: string;
+};
+
 type ReverseGeocodeResult = {
   displayName?: string;
   address?: Record<string, string>;
@@ -125,6 +131,8 @@ type LabeledGroup = SortGroup & {
 type CliArgs = {
   execute: boolean;
   dryRun: boolean;
+  deleteSource: boolean;
+  dedupOnly: boolean;
   configPath?: string;
   limit?: number;
 };
@@ -140,6 +148,17 @@ const placeLabelSchema = z.object({
 const DEFAULT_CONFIG_PATH = "/config/ai-photo-sorter.config.json";
 const LEGACY_CACHE_PATH = path.resolve(process.cwd(), ".cache", "photo-sorter-cache.json");
 const DEFAULT_PHOTO_ROOT = "/photo";
+const DEFAULT_SUPPORTED_EXTENSIONS = [
+  ".3gp",
+  ".avi",
+  ".heic",
+  ".jpeg",
+  ".jpg",
+  ".m4v",
+  ".mov",
+  ".mp4",
+  ".png",
+];
 const LOCATION_CONFIG_FILE_NAME = "ai-photo-sorter-location.config.json";
 const LEGACY_LOCATION_CONFIG_FILE_NAME = "photo-sorter-location.config.json";
 const FOLDER_METADATA_FILE_NAME = ".ai-sorted";
@@ -150,6 +169,11 @@ const MISC_PLACE_LABEL = "Misc";
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.dedupOnly) {
+    await runDedupOnly(args);
+    return;
+  }
+
   const configPath = path.resolve(process.cwd(), args.configPath ?? DEFAULT_CONFIG_PATH);
   const execute = args.execute;
   const config = await loadConfig(configPath, execute);
@@ -182,21 +206,29 @@ async function main() {
   await saveCache(cachePath, cache);
 
   if (!execute) {
-    printPlan(labeledGroups, dedupedFiles.duplicates, config);
+    printPlan(labeledGroups, dedupedFiles.duplicates, config, args.deleteSource);
     console.log("");
     console.log("Dry run only. Re-run with --execute to create folders and organize files.");
     return;
   }
 
-  await materializeGroups(labeledGroups, config);
+  await materializeGroups(labeledGroups, config, args.deleteSource);
+  if (args.deleteSource) {
+    await deleteSourceFiles(dedupedFiles.duplicates);
+  }
+
   console.log(
-    `Completed. Organized ${metadata.length} unique files into ${config.outputRoot}. Skipped ${dedupedFiles.duplicates.length} duplicates.`,
+    `Completed. Organized ${metadata.length} unique files into ${config.outputRoot}. ${
+      args.deleteSource ? `Deleted ${metadata.length + dedupedFiles.duplicates.length} source files. ` : ""
+    }Skipped ${dedupedFiles.duplicates.length} duplicates.`,
   );
 }
 
 export function parseArgs(args: string[]): CliArgs {
   let execute = false;
   let dryRun = false;
+  let deleteSource = false;
+  let dedupOnly = false;
   let configPath: string | undefined;
   let limit: number | undefined;
 
@@ -213,6 +245,16 @@ export function parseArgs(args: string[]): CliArgs {
       continue;
     }
 
+    if (arg === "--delete") {
+      deleteSource = true;
+      continue;
+    }
+
+    if (arg === "--dedup-only") {
+      dedupOnly = true;
+      continue;
+    }
+
     if (arg === "--config") {
       configPath = args[index + 1];
       index += 1;
@@ -225,7 +267,7 @@ export function parseArgs(args: string[]): CliArgs {
     }
   }
 
-  return { execute: execute && !dryRun, dryRun, configPath, limit };
+  return { execute: execute && !dryRun, dryRun, deleteSource, dedupOnly, configPath, limit };
 }
 
 export function parsePositiveIntegerFlag(flag: string, value: string | undefined) {
@@ -374,6 +416,78 @@ function getLegacyDestinationCachePath(config: Config) {
   return path.join(config.outputRoot, LEGACY_DESTINATION_CACHE_FILE_NAME);
 }
 
+async function runDedupOnly(args: CliArgs) {
+  const destination = resolveDedupOnlyDestination();
+  const cachePath = path.join(destination, DESTINATION_CACHE_FILE_NAME);
+  const cache = await loadCache(
+    cachePath,
+    path.join(destination, LEGACY_DESTINATION_CACHE_FILE_NAME),
+    LEGACY_CACHE_PATH,
+  );
+  const config = buildDedupOnlyConfig(destination);
+
+  console.log(`Dedup-only destination: ${destination}`);
+  const files = await collectFiles(config);
+  console.log(`Found ${files.length} media files in destination.`);
+
+  const duplicates = await findDestinationDuplicates(files, cache);
+  await saveCache(cachePath, cache);
+
+  if (duplicates.length === 0) {
+    console.log("No exact duplicates found.");
+    return;
+  }
+
+  printDedupOnlyPlan(duplicates, args.execute);
+  if (!args.execute) {
+    console.log("");
+    console.log("Dry run only. Re-run with --dedup-only --execute to delete duplicates.");
+    return;
+  }
+
+  await deleteSourceFiles(duplicates);
+  console.log(
+    `Completed. Deleted ${duplicates.length} duplicate files and kept the shortest-name copy in each set.`,
+  );
+}
+
+function resolveDedupOnlyDestination() {
+  const photoRoot = process.env.PHOTO_ROOT || DEFAULT_PHOTO_ROOT;
+  const destination = process.env.DESTINATION;
+
+  if (!destination) {
+    throw new Error(
+      "--dedup-only requires DESTINATION. Set PHOTO_ROOT and DESTINATION, for example DESTINATION=AI-sorted.",
+    );
+  }
+
+  return resolveConfiguredPath(destination, photoRoot);
+}
+
+function buildDedupOnlyConfig(destination: string): Config {
+  return {
+    sourceRoots: [destination],
+    outputRoot: destination,
+    mode: "hardlink",
+    inferenceWindowMinutes: 90,
+    supportedExtensions: DEFAULT_SUPPORTED_EXTENSIONS,
+    ignoreFolders: DEFAULT_IGNORE_FOLDERS,
+    openai: {
+      enabled: false,
+      model: "gpt-5-mini",
+    },
+    geocoding: {
+      provider: "nominatim",
+      userAgent: "ai-photo-sorter/1.0",
+      language: "en",
+      rateLimitMs: 0,
+      nearbyRadiusMeters: 800,
+      nearbyLimit: 8,
+    },
+    aliases: [],
+  };
+}
+
 export function limitFilesToProcess(files: SourceFileRecord[], limit?: number) {
   return limit === undefined ? files : files.slice(0, limit);
 }
@@ -480,6 +594,76 @@ async function dedupeFiles(files: SourceFileRecord[], cache: CacheFile) {
   uniqueFiles.sort((left, right) => left.filePath.localeCompare(right.filePath));
   duplicates.sort((left, right) => left.filePath.localeCompare(right.filePath));
   return { uniqueFiles, duplicates };
+}
+
+export async function findDestinationDuplicates(files: SourceFileRecord[], cache: CacheFile) {
+  const bySize = new Map<number, SourceFileRecord[]>();
+  for (const file of files) {
+    const bucket = bySize.get(file.sizeBytes);
+    if (bucket) {
+      bucket.push(file);
+    } else {
+      bySize.set(file.sizeBytes, [file]);
+    }
+  }
+
+  const duplicates: DestinationDuplicateFileRecord[] = [];
+
+  for (const bucket of bySize.values()) {
+    if (bucket.length === 1) {
+      continue;
+    }
+
+    const filesByHash = new Map<string, SourceFileRecord[]>();
+    for (const file of bucket) {
+      const contentHash = await getContentHash(file, cache);
+      const hashBucket = filesByHash.get(contentHash);
+      if (hashBucket) {
+        hashBucket.push(file);
+      } else {
+        filesByHash.set(contentHash, [file]);
+      }
+    }
+
+    for (const [contentHash, matchingFiles] of filesByHash) {
+      if (matchingFiles.length === 1) {
+        continue;
+      }
+
+      const canonical = chooseShortestNameCanonical(matchingFiles);
+      for (const file of matchingFiles) {
+        if (file.filePath === canonical.filePath) {
+          continue;
+        }
+
+        duplicates.push({
+          ...file,
+          keepFilePath: canonical.filePath,
+          keepFileName: canonical.fileName,
+          contentHash,
+        });
+      }
+    }
+  }
+
+  duplicates.sort((left, right) => left.filePath.localeCompare(right.filePath));
+  return duplicates;
+}
+
+export function chooseShortestNameCanonical(files: SourceFileRecord[]) {
+  return [...files].sort((left, right) => {
+    const nameLengthDelta = left.fileName.length - right.fileName.length;
+    if (nameLengthDelta !== 0) {
+      return nameLengthDelta;
+    }
+
+    const nameDelta = left.fileName.localeCompare(right.fileName);
+    if (nameDelta !== 0) {
+      return nameDelta;
+    }
+
+    return left.filePath.localeCompare(right.filePath);
+  })[0];
 }
 
 async function getContentHash(file: SourceFileRecord, cache: CacheFile) {
@@ -1210,6 +1394,7 @@ function buildOpenAIClient(config: Config) {
 async function materializeGroups(
   groups: LabeledGroup[],
   config: Config,
+  deleteSource: boolean,
 ) {
   for (const group of groups) {
     const directory = path.join(config.outputRoot, group.year, group.folderName);
@@ -1218,7 +1403,7 @@ async function materializeGroups(
 
     for (const file of group.files) {
       const targetPath = await uniqueTargetPath(directory, file.fileName);
-      await placeFile(file.filePath, targetPath, config.mode);
+      await placeFile(file.filePath, targetPath, config.mode, deleteSource);
     }
   }
 }
@@ -1241,9 +1426,12 @@ async function uniqueTargetPath(directory: string, fileName: string) {
   }
 }
 
-async function placeFile(sourcePath: string, targetPath: string, mode: SortMode) {
+export async function placeFile(sourcePath: string, targetPath: string, mode: SortMode, deleteSource = false) {
   if (mode === "copy") {
     await fs.copyFile(sourcePath, targetPath);
+    if (deleteSource) {
+      await fs.unlink(sourcePath);
+    }
     return;
   }
 
@@ -1253,10 +1441,19 @@ async function placeFile(sourcePath: string, targetPath: string, mode: SortMode)
   }
 
   await fs.link(sourcePath, targetPath);
+  if (deleteSource) {
+    await fs.unlink(sourcePath);
+  }
 }
 
-function printPlan(groups: LabeledGroup[], duplicates: DuplicateFileRecord[], config: Config) {
+function printPlan(
+  groups: LabeledGroup[],
+  duplicates: DuplicateFileRecord[],
+  config: Config,
+  deleteSource: boolean,
+) {
   console.log(`Target root: ${config.outputRoot}`);
+  console.log(`Delete source files: ${deleteSource ? "yes, including skipped duplicates" : "no"}`);
   console.log(`Dry run plan for ${groups.length} folder groups:`);
 
   for (const group of groups) {
@@ -1291,8 +1488,32 @@ function printPlan(groups: LabeledGroup[], duplicates: DuplicateFileRecord[], co
       console.log(`- source: ${duplicate.filePath}`);
       console.log(`  duplicateOf: ${duplicate.duplicateOf}`);
       console.log(`  sizeBytes: ${duplicate.sizeBytes}`);
-      console.log(`  reasoning: Skipped as an exact duplicate based on identical file size and SHA-256 hash ${duplicate.contentHash.slice(0, 12)}.`);
+      console.log(
+        `  reasoning: Skipped as an exact duplicate based on identical file size and SHA-256 hash ${duplicate.contentHash.slice(0, 12)}.${
+          deleteSource ? " Source will be deleted during execute." : ""
+        }`,
+      );
     }
+  }
+}
+
+function printDedupOnlyPlan(duplicates: DestinationDuplicateFileRecord[], execute: boolean) {
+  console.log(`${execute ? "Deleting" : "Would delete"} ${duplicates.length} exact duplicate files:`);
+  for (const duplicate of duplicates) {
+    console.log(`- duplicate: ${duplicate.filePath}`);
+    console.log(`  keep: ${duplicate.keepFilePath}`);
+    console.log(
+      `  reason: Exact duplicate by file size and SHA-256 hash ${duplicate.contentHash.slice(
+        0,
+        12,
+      )}; kept shortest filename "${duplicate.keepFileName}".`,
+    );
+  }
+}
+
+export async function deleteSourceFiles(files: Array<{ filePath: string }>) {
+  for (const file of files) {
+    await fs.unlink(file.filePath);
   }
 }
 
